@@ -778,8 +778,128 @@ int ntls_construct_client_key_exchange_ntls(SSL *s, WPACKET *pkt)
  err:
     return 0;
 }
-
+//modify by xm
+//GMSSL gmssl not use digest
 int ntls_construct_cert_verify_ntls(SSL *s, WPACKET *pkt)
+{
+    EVP_PKEY *pkey = NULL;
+    const EVP_MD *md = NULL;
+    EVP_MD_CTX *mctx = NULL;
+    EVP_PKEY_CTX *pctx = NULL;
+    size_t hdatalen = 0, siglen = 0;
+    void *hdata;
+    unsigned char *sig = NULL;
+    
+    const SIGALG_LOOKUP *lu = s->s3->tmp.sigalg;
+
+    if (lu == NULL || s->s3->tmp.sign_cert == NULL) {
+        SSLfatal_ntls(s, SSL_AD_INTERNAL_ERROR,
+                      SSL_F_NTLS_CONSTRUCT_CERT_VERIFY_NTLS,
+                      ERR_R_INTERNAL_ERROR);
+        goto err;
+    }
+
+    pkey = s->s3->tmp.sign_cert->privatekey;
+
+    if (pkey == NULL || !tls1_lookup_md(lu, &md)) {
+        SSLfatal_ntls(s, SSL_AD_INTERNAL_ERROR,
+                      SSL_F_NTLS_CONSTRUCT_CERT_VERIFY_NTLS,
+                      ERR_R_INTERNAL_ERROR);
+        goto err;
+    }
+
+    mctx = EVP_MD_CTX_new();
+    if (mctx == NULL) {
+        SSLfatal_ntls(s, SSL_AD_INTERNAL_ERROR, SSL_F_NTLS_CONSTRUCT_CERT_VERIFY_NTLS,
+                 ERR_R_MALLOC_FAILURE);
+        goto err;
+    }
+    
+#ifndef OPENSSL_NO_SM2
+    if (EVP_PKEY_is_sm2(pkey)) {
+        if (pkey != NULL) {
+            pctx = EVP_PKEY_CTX_new(pkey, NULL);
+
+            if (EVP_PKEY_CTX_set1_id(pctx, HANDSHAKE_SM2_ID, HANDSHAKE_SM2_ID_LEN) != 1) {
+                SSLfatal_ntls(s, SSL_AD_INTERNAL_ERROR, SSL_F_NTLS_CONSTRUCT_CERT_VERIFY_NTLS,
+                         ERR_R_INTERNAL_ERROR);
+                goto err;
+            }
+            EVP_MD_CTX_set_pkey_ctx(mctx, pctx);
+        }
+    }
+#endif
+
+    hdatalen = BIO_get_mem_data(s->s3->handshake_buffer, &hdata);
+    if (hdatalen <= 0) {
+        SSLfatal_ntls(s, SSL_AD_INTERNAL_ERROR,
+                      SSL_F_NTLS_CONSTRUCT_CERT_VERIFY_NTLS,
+                      ERR_R_INTERNAL_ERROR);
+        goto err;
+    }
+    
+	siglen = EVP_PKEY_size(pkey);
+    sig = OPENSSL_malloc(siglen);
+    if (sig == NULL) {
+        SSLfatal_ntls(s, SSL_AD_INTERNAL_ERROR,
+                      SSL_F_NTLS_CONSTRUCT_CERT_VERIFY_NTLS,
+                      ERR_R_MALLOC_FAILURE);
+        goto err;
+    }
+    
+    
+	if (EVP_SignInit_ex(mctx, md, NULL) <= 0) {
+		SSLfatal_ntls(s, SSL_AD_INTERNAL_ERROR, SSL_F_NTLS_CONSTRUCT_CERT_VERIFY_NTLS,
+				 ERR_R_EVP_LIB);
+		goto err;
+	}
+	
+	if (EVP_SignUpdate(mctx, hdata, hdatalen) <= 0) 
+	{
+		SSLfatal_ntls(s, SSL_AD_INTERNAL_ERROR, SSL_F_NTLS_CONSTRUCT_CERT_VERIFY_NTLS,
+				 ERR_R_EVP_LIB);
+		goto err;
+	}
+	
+	if (s->version == SSL3_VERSION && !EVP_MD_CTX_ctrl(mctx, EVP_CTRL_SSL3_MASTER_SECRET,
+							(int)s->session->master_key_length,
+							s->session->master_key) ) {
+		SSLfatal_ntls(s, SSL_AD_INTERNAL_ERROR, SSL_F_NTLS_CONSTRUCT_CERT_VERIFY_NTLS,
+				 ERR_R_EVP_LIB);
+		goto err;
+	}
+	
+	if (EVP_SignFinal(mctx, sig, &siglen, pkey) <= 0) 
+	{
+		SSLfatal_ntls(s, SSL_AD_INTERNAL_ERROR, SSL_F_NTLS_CONSTRUCT_CERT_VERIFY_NTLS,
+				 ERR_R_EVP_LIB);
+		goto err;
+	}
+    
+    if (!WPACKET_sub_memcpy_u16(pkt, sig, siglen)) {
+        SSLfatal_ntls(s, SSL_AD_INTERNAL_ERROR, SSL_F_NTLS_CONSTRUCT_CERT_VERIFY_NTLS,
+                 ERR_R_INTERNAL_ERROR);
+        goto err;
+    }
+
+    /* Digest cached records and discard handshake buffer */
+    if (!ssl3_digest_cached_records(s, 0)) {
+        /* SSLfatal_ntls() already called */
+        goto err;
+    }
+
+    OPENSSL_free(sig);
+    EVP_MD_CTX_free(mctx);
+    EVP_PKEY_CTX_free(pctx);
+    return 1;
+ err:
+    OPENSSL_free(sig);
+    EVP_MD_CTX_free(mctx);
+    EVP_PKEY_CTX_free(pctx);
+    return 0;
+}
+
+int ntls_construct_cert_verify_ntls_old(SSL *s, WPACKET *pkt)
 {
     EVP_PKEY *pkey = NULL;
     const EVP_MD *md = NULL;

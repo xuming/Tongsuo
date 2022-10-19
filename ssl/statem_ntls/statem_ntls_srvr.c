@@ -855,8 +855,7 @@ MSG_PROCESS_RETURN ntls_process_client_key_exchange_ntls(SSL *s, PACKET *pkt)
  err:
     return MSG_PROCESS_ERROR;
 }
-
-MSG_PROCESS_RETURN ntls_process_cert_verify_ntls(SSL *s, PACKET *pkt)
+MSG_PROCESS_RETURN ntls_process_cert_verify_ntls_old(SSL *s, PACKET *pkt)
 {
     MSG_PROCESS_RETURN ret = MSG_PROCESS_ERROR;
     EVP_PKEY *pkey = NULL;
@@ -999,6 +998,166 @@ MSG_PROCESS_RETURN ntls_process_cert_verify_ntls(SSL *s, PACKET *pkt)
     BIO_free(s->s3->handshake_buffer);
     s->s3->handshake_buffer = NULL;
     EVP_MD_CTX_free(mctx2);
+    EVP_MD_CTX_free(mctx);
+    EVP_PKEY_CTX_free(pctx);
+
+    return ret;
+}
+
+//modify by xu
+//gmssl no digest
+MSG_PROCESS_RETURN ntls_process_cert_verify_ntls(SSL *s, PACKET *pkt)
+{
+    MSG_PROCESS_RETURN ret = MSG_PROCESS_ERROR;
+    EVP_PKEY *pkey = NULL;
+    const unsigned char *data;
+    unsigned int len;
+    X509 *peer;
+    const EVP_MD *md = NULL;
+    size_t hdatalen = 0;
+    void *hdata;
+    EVP_MD_CTX *mctx = EVP_MD_CTX_new();
+    EVP_PKEY_CTX *pctx = NULL;
+    int j;
+    unsigned char out[EVP_MAX_MD_SIZE];
+    size_t outlen = 0;
+
+    if (mctx == NULL ) {
+        SSLfatal_ntls(s, SSL_AD_INTERNAL_ERROR,
+                      SSL_F_NTLS_PROCESS_CERT_VERIFY_NTLS,
+                      ERR_R_MALLOC_FAILURE);
+        goto err;
+    }
+
+    /*
+     * XXX: Don't forget that session->peer stores the client signing
+     * certificate...
+     */
+    peer = s->session->peer;
+    pkey = X509_get0_pubkey(peer);
+    if (pkey == NULL) {
+        SSLfatal_ntls(s, SSL_AD_INTERNAL_ERROR,
+                      SSL_F_NTLS_PROCESS_CERT_VERIFY_NTLS,
+                      ERR_R_INTERNAL_ERROR);
+        goto err;
+    }
+
+    if (ssl_cert_lookup_by_pkey(pkey, NULL) == NULL) {
+        SSLfatal_ntls(s, SSL_AD_ILLEGAL_PARAMETER,
+                      SSL_F_NTLS_PROCESS_CERT_VERIFY_NTLS,
+                      SSL_R_SIGNATURE_FOR_NON_SIGNING_CERTIFICATE);
+        goto err;
+    }
+
+    if (!tls1_set_peer_legacy_sigalg(s, pkey)) {
+        SSLfatal_ntls(s, SSL_AD_INTERNAL_ERROR,
+                      SSL_F_NTLS_PROCESS_CERT_VERIFY_NTLS,
+                      ERR_R_INTERNAL_ERROR);
+        goto err;
+    }
+
+    if (!tls1_lookup_md(s->s3->tmp.peer_sigalg, &md)) {
+        SSLfatal_ntls(s, SSL_AD_INTERNAL_ERROR,
+                      SSL_F_NTLS_PROCESS_CERT_VERIFY_NTLS,
+                      ERR_R_INTERNAL_ERROR);
+        goto err;
+    }
+
+    if (!PACKET_get_net_2(pkt, &len)) {
+        SSLfatal_ntls(s, SSL_AD_DECODE_ERROR,
+                      SSL_F_NTLS_PROCESS_CERT_VERIFY_NTLS,
+                      SSL_R_LENGTH_MISMATCH);
+        goto err;
+    }
+
+    j = EVP_PKEY_size(pkey);
+    if (((int)len > j) || ((int)PACKET_remaining(pkt) > j)
+        || (PACKET_remaining(pkt) == 0)) {
+        SSLfatal_ntls(s, SSL_AD_DECODE_ERROR,
+                      SSL_F_NTLS_PROCESS_CERT_VERIFY_NTLS,
+                      SSL_R_WRONG_SIGNATURE_SIZE);
+        goto err;
+    }
+
+    if (!PACKET_get_bytes(pkt, &data, len)) {
+        SSLfatal_ntls(s, SSL_AD_DECODE_ERROR,
+                      SSL_F_NTLS_PROCESS_CERT_VERIFY_NTLS,
+                      SSL_R_LENGTH_MISMATCH);
+        goto err;
+    }
+
+    hdatalen = BIO_get_mem_data(s->s3->handshake_buffer, &hdata);
+    if (hdatalen <= 0) {
+        SSLfatal_ntls(s, SSL_AD_INTERNAL_ERROR,
+                      SSL_F_NTLS_PROCESS_CERT_VERIFY_NTLS,
+                      ERR_R_INTERNAL_ERROR);
+        goto err;
+    }
+
+
+#ifdef SSL_DEBUG
+    fprintf(stderr, "Using client verify alg %s\n", EVP_MD_name(md));
+    fprintf(stderr, "EVP_PKEY type: %s\n", OBJ_nid2ln(EVP_PKEY_id(pkey)));
+#endif
+#ifndef OPENSSL_NO_SM2
+    if (EVP_PKEY_is_sm2(pkey)) {
+        pctx = EVP_PKEY_CTX_new(pkey, NULL);
+        if (pctx == NULL) {
+            SSLfatal_ntls(s, SSL_AD_INTERNAL_ERROR,
+                          SSL_F_NTLS_PROCESS_CERT_VERIFY_NTLS,
+                          ERR_R_MALLOC_FAILURE);
+            goto err;
+        }
+
+        if (EVP_PKEY_CTX_set1_id(pctx, SM2_DEFAULT_ID, SM2_DEFAULT_ID_LEN) <= 0) {
+            SSLfatal_ntls(s, SSL_AD_INTERNAL_ERROR,
+                          SSL_F_NTLS_PROCESS_CERT_VERIFY_NTLS,
+                          ERR_R_EVP_LIB);
+            goto err;
+        }
+
+        EVP_MD_CTX_set_pkey_ctx(mctx, pctx);
+    }
+#endif
+
+	if (!EVP_VerifyInit_ex(mctx, md, NULL)){
+		SSLfatal_ntls(s, SSL_AD_INTERNAL_ERROR,
+                      SSL_F_NTLS_PROCESS_CERT_VERIFY_NTLS,
+                      ERR_R_EVP_LIB);
+        goto err;
+	}
+
+	if (!EVP_VerifyUpdate(mctx, hdata, hdatalen)){
+		SSLfatal_ntls(s, SSL_AD_INTERNAL_ERROR,
+                      SSL_F_NTLS_PROCESS_CERT_VERIFY_NTLS,
+                      ERR_R_EVP_LIB);
+        goto err;
+	}
+
+    if (s->version == SSL3_VERSION) {
+        if (!EVP_MD_CTX_ctrl(mctx, EVP_CTRL_SSL3_MASTER_SECRET,
+                                    (int)s->session->master_key_length,
+                                    s->session->master_key)) {
+        	SSLfatal_ntls(s, SSL_AD_DECRYPT_ERROR,
+                      SSL_F_NTLS_PROCESS_CERT_VERIFY_NTLS,
+                      ERR_R_EVP_LIB);
+            goto err;
+        }
+    }
+
+    if (EVP_VerifyFinal(mctx, data, len, pkey) <= 0) {
+		SSLfatal_ntls(s, SSL_AD_DECRYPT_ERROR,
+                      SSL_F_NTLS_PROCESS_CERT_VERIFY_NTLS,
+                      SSL_R_BAD_SIGNATURE);
+        goto err;
+    }
+
+    ret = MSG_PROCESS_CONTINUE_READING;
+
+err:
+
+    BIO_free(s->s3->handshake_buffer);
+    s->s3->handshake_buffer = NULL;
     EVP_MD_CTX_free(mctx);
     EVP_PKEY_CTX_free(pctx);
 
