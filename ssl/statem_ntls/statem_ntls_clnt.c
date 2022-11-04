@@ -778,6 +778,7 @@ int ntls_construct_client_key_exchange_ntls(SSL *s, WPACKET *pkt)
  err:
     return 0;
 }
+#ifdef GMSSL
 //modify by xm
 //GMSSL gmssl not use digest
 int ntls_construct_cert_verify_ntls(SSL *s, WPACKET *pkt)
@@ -898,8 +899,8 @@ int ntls_construct_cert_verify_ntls(SSL *s, WPACKET *pkt)
     EVP_PKEY_CTX_free(pctx);
     return 0;
 }
-
-int ntls_construct_cert_verify_ntls_old(SSL *s, WPACKET *pkt)
+#else
+int ntls_construct_cert_verify_ntls(SSL *s, WPACKET *pkt)
 {
     EVP_PKEY *pkey = NULL;
     const EVP_MD *md = NULL;
@@ -1018,5 +1019,5 @@ int ntls_construct_cert_verify_ntls_old(SSL *s, WPACKET *pkt)
     EVP_PKEY_CTX_free(pctx);
     return 0;
 }
-
+#endif
 #endif

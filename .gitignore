@@ -184,3 +184,4 @@ pod2htmd.tmp
 *.manifest
 doc-nits
 .vscode
+.DS_Store
